@@ -18,6 +18,7 @@ import {
 } from "./chat-commands.ts";
 import { loadChatHistory, type ChatHistoryResult } from "./chat-history.ts";
 import {
+  anyChatOutboxPaneMatches,
   excludeComposerAttachments,
   readQueuedMessageById,
   removeQueuedMessageWithoutReleasing,
@@ -296,6 +297,17 @@ async function reconcileStoredChatOutboxHead(
     const verifiedHistory = await readCurrentStoredChatHistory(...historyArgs);
     if (verifiedHistory === "blocked" || verifiedHistory === "continue") {
       return verifiedHistory;
+    }
+    const liveSendCurrent = anyChatOutboxPaneMatches(host, (pane) => {
+      const liveItem = pane.chatQueue.find((entry) => entry.id === item.id);
+      return (
+        liveItem?.sendState === "sending" &&
+        sameQueuedDeliveryVersion(liveItem, { ...item, sendState: "sending" })
+      );
+    });
+    if (liveSendCurrent) {
+      scheduleStoredChatOutboxRetry(host, outbox, STORED_OUTBOX_RETRY_DEFAULT_MS, dependencies);
+      return "blocked";
     }
     const parked = updateQueuedMessageForSession(host, outbox.sessionKey, item.id, (entry) => ({
       ...entry,

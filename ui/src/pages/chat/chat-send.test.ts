@@ -5606,6 +5606,50 @@ describe("handleSendChat", () => {
     expect(host.chatMessages).toStrictEqual([]);
   });
 
+  it("keeps an acknowledged live send pending while durable history is briefly stale", async () => {
+    let historyRequests = 0;
+    let runId: string | undefined;
+    const host = makeChatHost({
+      requestHandlers: {
+        "chat.history": () => {
+          historyRequests += 1;
+          return Promise.resolve({
+            messages:
+              historyRequests > 2
+                ? [{ role: "user", __openclaw: { idempotencyKey: `${runId}:user` } }]
+                : [],
+            sessionInfo: row("agent:main", { hasActiveRun: false, status: "done" }),
+          });
+        },
+        "chat.send": (params: unknown) => {
+          const payload = requireRecord(params, "live send payload");
+          runId = String(payload.idempotencyKey);
+          return Promise.resolve({ runId, status: "started" });
+        },
+      },
+    });
+
+    await handleSendChat(host, "history will catch up");
+    expect(host.chatQueue).toEqual([
+      expect.objectContaining({ sendState: "sending", text: "history will catch up" }),
+    ]);
+    expect(loadChatComposerSnapshot(host, host.sessionKey)?.queue).toEqual([
+      expect.objectContaining({ sendAttempts: 1, sendState: "waiting-reconnect" }),
+    ]);
+
+    host.chatRunId = null;
+    await flushChatQueueForEvent(host);
+
+    expect(host.chatQueue[0]?.sendState).toBe("sending");
+    expect(host.lastError).toBeNull();
+    await waitForFast(() => expect(listStoredChatOutboxes(host)).toStrictEqual([]), {
+      timeout: 1_000,
+    });
+    expect(historyRequests).toBeGreaterThanOrEqual(3);
+    expect(host.chatQueue).toStrictEqual([]);
+    expect(host.lastError).toBeNull();
+  });
+
   it("coalesces duplicate queued local commands while the first command is running", async () => {
     const command = createDeferred<{ content: string }>();
     executeSlashCommandMock.mockImplementation(() => command.promise);
